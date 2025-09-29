@@ -1,0 +1,16 @@
+node_modules/
+.env 
+dist/
+build/
+.vscode/
+.DS_Store
+npm/
+yarn/
+.idea/
+*.log
+coverage/
+*.tsbuildinfo
+*.swp
+.cache/
+
+    

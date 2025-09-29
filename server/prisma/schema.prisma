@@ -1,0 +1,198 @@
+// prisma/schema.prisma
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum TxStatus {
+  pending
+  posted
+  canceled
+  reversed
+}
+
+enum TxSign {
+  debit
+  credit
+}
+
+enum ProviderType {
+  aggregator
+  direct
+}
+
+model Provider {
+  id        String      @id @default(uuid())
+  name      String
+  type      ProviderType
+  status    String      @default("active")
+  createdAt DateTime    @default(now()) @map("created_at")
+  
+  accounts        Account[]
+  rawTransactions RawTransaction[]
+  
+  @@map("providers")
+}
+
+model Account {
+  id            String  @id @default(uuid())
+  userId        String  @map("user_id")
+  providerId    String  @map("provider_id")
+  institutionId String  @map("institution_id")
+  accountType   String  @map("account_type")
+  currency      String  @default("USD")
+  mask          String?
+  displayName   String? @map("display_name")
+  isActive      Boolean @default(true) @map("is_active")
+  metadata      Json    @default("{}") @map("metadata")
+  createdAt     DateTime @default(now()) @map("created_at")
+  
+  provider            Provider              @relation(fields: [providerId], references: [id], onDelete: Restrict)
+  rawTransactions     RawTransaction[]
+  canonicalTxns       CanonicalTransaction[]
+  reconciliationRuns  ReconciliationRun[]
+  
+  @@map("accounts")
+}
+
+model RawTransaction {
+  id              String    @id @default(uuid())
+  providerTxId    String?   @map("provider_tx_id")
+  providerId      String    @map("provider_id")
+  accountId       String    @map("account_id")
+  timestampPosted DateTime? @map("timestamp_posted")
+  timestampAuth   DateTime? @map("timestamp_auth")
+  amount          Decimal   @db.Decimal(18, 2)
+  currency        String    @default("USD")
+  descriptionRaw  String    @map("description_raw")
+  counterpartyRaw String?   @map("counterparty_raw")
+  balanceAfter    Decimal?  @map("balance_after") @db.Decimal(18, 2)
+  metaJson        Json      @default("{}") @map("meta_json")
+  hashV1          String    @map("hash_v1")
+  ingestedAt      DateTime  @default(now()) @map("ingested_at")
+  
+  provider Provider @relation(fields: [providerId], references: [id], onDelete: Restrict)
+  account  Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  
+  @@unique([providerId, providerTxId], map: "raw_provider_txid")
+  @@unique([providerId, accountId, hashV1], map: "raw_provider_acct_hash")
+  @@index([accountId, ingestedAt])
+  @@map("raw_transactions")
+}
+
+model CanonicalTransaction {
+  id               String    @id @default(uuid())
+  groupKey         String?   @map("group_key")
+  accountId        String    @map("account_id")
+  postedAt         DateTime  @map("posted_at")
+  effectiveAt      DateTime? @map("effective_at")
+  amount           Decimal   @db.Decimal(18, 2)
+  currency         String    @default("USD")
+  descriptionNorm  String    @map("description_norm")
+  counterpartyNorm String?   @map("counterparty_norm")
+  fitId            String?   @map("fit_id")
+  txType           String    @map("tx_type")
+  status           TxStatus  @default(posted)
+  sourceQuality    String    @default("B") @map("source_quality")
+  rawIds           String[]  @map("raw_ids")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  
+  account         Account           @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  transfersOut    TransferLink[]    @relation("TransferOut")
+  transfersIn     TransferLink[]    @relation("TransferIn")
+  classification  Classification?
+  ledgerEntries   LedgerEntry[]
+  
+  @@index([accountId, postedAt])
+  @@index([amount, postedAt])
+  @@index([groupKey])
+  @@map("canonical_transactions")
+}
+
+model TransferLink {
+  id               String   @id @default(uuid())
+  txnOutId         String   @map("txn_out_id")
+  txnInId          String   @map("txn_in_id")
+  detectionMethod  String   @map("detection_method")
+  confidence       Decimal  @db.Decimal(3, 2)
+  windowSec        Int      @map("window_sec")
+  notes            String?
+  createdAt        DateTime @default(now()) @map("created_at")
+  
+  txnOut CanonicalTransaction @relation("TransferOut", fields: [txnOutId], references: [id], onDelete: Cascade)
+  txnIn  CanonicalTransaction @relation("TransferIn", fields: [txnInId], references: [id], onDelete: Cascade)
+  
+  @@unique([txnOutId, txnInId])
+  @@index([txnOutId])
+  @@index([txnInId])
+  @@map("links_transfers")
+}
+
+model Category {
+  id          String    @id @default(uuid())
+  name        String    @unique
+  parentId    String?   @map("parent_id")
+  isTransfer  Boolean   @default(false) @map("is_transfer")
+  isPayment   Boolean   @default(false) @map("is_payment")
+  isRefund    Boolean   @default(false) @map("is_refund")
+  gaapMap     String?   @map("gaap_map")
+  
+  parent         Category?        @relation("CategoryHierarchy", fields: [parentId], references: [id], onDelete: SetNull)
+  children       Category[]       @relation("CategoryHierarchy")
+  classifications Classification[]
+  
+  @@map("categories")
+}
+
+model Classification {
+  txnId          String   @id @map("txn_id")
+  categoryId     String?  @map("category_id")
+  confidence     Decimal  @db.Decimal(3, 2)
+  modelVersion   String?  @map("model_version")
+  explanations   Json     @default("{}") @map("explanations")
+  lockedByUser   Boolean  @default(false) @map("locked_by_user")
+  updatedAt      DateTime @default(now()) @map("updated_at")
+  
+  transaction CanonicalTransaction @relation(fields: [txnId], references: [id], onDelete: Cascade)
+  category    Category?            @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  
+  @@map("txn_classifications")
+}
+
+model LedgerEntry {
+  id        String  @id @default(uuid())
+  txnId     String  @map("txn_id")
+  lineNo    Int     @map("line_no")
+  glAccount String  @map("gl_account")
+  amount    Decimal @db.Decimal(18, 2)
+  sign      TxSign
+  memo      String?
+  createdAt DateTime @default(now()) @map("created_at")
+  
+  transaction CanonicalTransaction @relation(fields: [txnId], references: [id], onDelete: Cascade)
+  
+  @@unique([txnId, lineNo])
+  @@index([glAccount])
+  @@map("ledger_entries")
+}
+
+model ReconciliationRun {
+  id                  String   @id @default(uuid())
+  accountId           String   @map("account_id")
+  asOfDate            DateTime @map("as_of_date") @db.Date
+  systemBalance       Decimal  @map("system_balance") @db.Decimal(18, 2)
+  institutionBalance  Decimal  @map("institution_balance") @db.Decimal(18, 2)
+  delta              Decimal  @db.Decimal(18, 2)
+  status             String
+  reportUrl          String?  @map("report_url")
+  createdAt          DateTime @default(now()) @map("created_at")
+  
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  
+  @@unique([accountId, asOfDate], map: "account_id_as_of_date")
+  @@map("reconciliation_runs")
+}
