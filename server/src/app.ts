@@ -3,9 +3,9 @@ import cors from 'cors'
 import helmet from 'helmet'
 import morgan from 'morgan'
 import compression from 'compression'
-import rateLimit from 'express-rate-limit'
 import routes from './routes'
 import { logger } from './lib/logger'
+import { generalRateLimit } from './middleware/rateLimit'
 
 const app = express()
 
@@ -16,13 +16,8 @@ app.use(cors({
   credentials: true
 }))
 
-// Rate limiting
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // limit each IP to 100 requests per windowMs
-  message: 'Too many requests from this IP'
-})
-app.use('/api', limiter)
+// Rate limiting (Redis-based)
+app.use('/api', generalRateLimit)
 
 // Body parsing
 app.use(compression())
@@ -40,7 +35,7 @@ app.use('/api', routes)
 // Error handling
 app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
   logger.error('Unhandled error:', err)
-  res.status(500).json({
+  res.status(err.status || 500).json({
     ok: false,
     error: process.env.NODE_ENV === 'production' ? 'Internal server error' : err.message
   })

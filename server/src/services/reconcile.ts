@@ -32,7 +32,7 @@ export async function reconcileAccount(accountId: string, asOfDate: Date = new D
 
   const reconciliation = await prisma.reconciliationRun.upsert({
     where: {
-      account_id_as_of_date: {
+      accountId_asOfDate: {
         accountId,
         asOfDate: new Date(dateStr)
       }

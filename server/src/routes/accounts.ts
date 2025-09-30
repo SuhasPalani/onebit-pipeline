@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import { prisma } from '../lib/db'
 import { z } from 'zod'
+import { accountCacheMiddleware, invalidateAccountCache } from '../middleware/cache'
 
 const router = Router()
 
@@ -14,6 +15,7 @@ const accountSchema = z.object({
   display_name: z.string().optional()
 })
 
+// Create account
 router.post('/', async (req, res) => {
   try {
     const data = accountSchema.parse(req.body)
@@ -30,13 +32,17 @@ router.post('/', async (req, res) => {
       }
     })
 
+    // Invalidate list cache
+    await invalidateAccountCache('list')
+
     res.json(account)
   } catch (error) {
     res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' })
   }
 })
 
-router.get('/', async (req, res) => {
+// Get all accounts (with caching)
+router.get('/', accountCacheMiddleware, async (req, res) => {
   try {
     const accounts = await prisma.account.findMany({
       include: {
@@ -55,7 +61,8 @@ router.get('/', async (req, res) => {
   }
 })
 
-router.get('/:id', async (req, res) => {
+// Get single account (with caching)
+router.get('/:id', accountCacheMiddleware, async (req, res) => {
   try {
     const account = await prisma.account.findUnique({
       where: { id: req.params.id },
@@ -63,7 +70,12 @@ router.get('/:id', async (req, res) => {
         provider: true,
         canonicalTxns: {
           orderBy: { postedAt: 'desc' },
-          take: 50
+          take: 50,
+          include: {
+            classification: {
+              include: { category: true }
+            }
+          }
         }
       }
     })
@@ -73,6 +85,39 @@ router.get('/:id', async (req, res) => {
     }
     
     res.json(account)
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' })
+  }
+})
+
+// Update account
+router.patch('/:id', async (req, res) => {
+  try {
+    const account = await prisma.account.update({
+      where: { id: req.params.id },
+      data: req.body
+    })
+
+    // Invalidate cache
+    await invalidateAccountCache(req.params.id)
+
+    res.json(account)
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' })
+  }
+})
+
+// Delete account
+router.delete('/:id', async (req, res) => {
+  try {
+    await prisma.account.delete({
+      where: { id: req.params.id }
+    })
+
+    // Invalidate cache
+    await invalidateAccountCache(req.params.id)
+
+    res.json({ ok: true })
   } catch (error) {
     res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' })
   }
