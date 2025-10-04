@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Plaid Link Test</title>
+    <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
+    <style>
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        max-width: 800px;
+        margin: 50px auto;
+        padding: 20px;
+      }
+      button {
+        background: #000;
+        color: white;
+        border: none;
+        padding: 12px 24px;
+        font-size: 16px;
+        border-radius: 6px;
+        cursor: pointer;
+      }
+      button:hover {
+        background: #333;
+      }
+      button:disabled {
+        background: #ccc;
+        cursor: not-allowed;
+      }
+      .result {
+        margin-top: 20px;
+        padding: 15px;
+        background: #f5f5f5;
+        border-radius: 6px;
+        white-space: pre-wrap;
+        font-family: monospace;
+        font-size: 12px;
+      }
+      .step {
+        margin: 20px 0;
+        padding: 15px;
+        border-left: 4px solid #000;
+        background: #f9f9f9;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Test Plaid Link Integration</h1>
+
+    <div class="step">
+      <h3>Step 1: Get Link Token</h3>
+      <input
+        type="text"
+        id="accountId"
+        placeholder="Account ID (from your database)"
+        style="width: 400px; padding: 8px; margin-right: 10px"
+      />
+      <button id="getLinkToken">Get Link Token</button>
+      <div id="linkTokenResult" class="result" style="display: none"></div>
+    </div>
+
+    <div class="step">
+      <h3>Step 2: Open Plaid Link</h3>
+      <button id="openLink" disabled>Open Plaid Link</button>
+      <p style="color: #666; font-size: 14px">
+        This will open Plaid's interface to connect your bank account
+      </p>
+    </div>
+
+    <div class="step">
+      <h3>Step 3: Exchange Token</h3>
+      <div id="exchangeResult" class="result" style="display: none"></div>
+    </div>
+
+    <div class="step">
+      <h3>Step 4: Sync Transactions</h3>
+      <button id="syncTransactions" disabled>Sync Transactions</button>
+      <div id="syncResult" class="result" style="display: none"></div>
+    </div>
+
+    <script>
+      const API_BASE = "http://localhost:3001/api";
+      let linkToken = null;
+      let accountId = null;
+      let handler = null;
+
+      // Step 1: Get Link Token
+      document
+        .getElementById("getLinkToken")
+        .addEventListener("click", async () => {
+          accountId = document.getElementById("accountId").value.trim();
+          if (!accountId) {
+            alert("Please enter an account ID");
+            return;
+          }
+
+          try {
+            const response = await fetch(`${API_BASE}/plaid/link/token`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ user_id: "user-123" }),
+            });
+
+            const data = await response.json();
+            linkToken = data.link_token;
+
+            document.getElementById("linkTokenResult").textContent =
+              JSON.stringify(data, null, 2);
+            document.getElementById("linkTokenResult").style.display = "block";
+            document.getElementById("openLink").disabled = false;
+
+            // Initialize Plaid Link handler
+            handler = Plaid.create({
+              token: linkToken,
+              onSuccess: async (public_token, metadata) => {
+                console.log("Link success!", { public_token, metadata });
+                await exchangeToken(public_token);
+              },
+              onExit: (err, metadata) => {
+                console.log("Link exited", { err, metadata });
+                if (err) {
+                  alert("Error: " + err.error_message);
+                }
+              },
+            });
+          } catch (error) {
+            alert("Error getting link token: " + error.message);
+          }
+        });
+
+      // Step 2: Open Plaid Link
+      document.getElementById("openLink").addEventListener("click", () => {
+        if (handler) {
+          handler.open();
+        }
+      });
+
+      // Step 3: Exchange Token (called automatically after success)
+      async function exchangeToken(publicToken) {
+        try {
+          const response = await fetch(`${API_BASE}/plaid/link/exchange`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              public_token: publicToken,
+              account_id: accountId,
+            }),
+          });
+
+          const data = await response.json();
+          document.getElementById("exchangeResult").textContent =
+            JSON.stringify(data, null, 2);
+          document.getElementById("exchangeResult").style.display = "block";
+          document.getElementById("syncTransactions").disabled = false;
+
+          alert("Account linked successfully! You can now sync transactions.");
+        } catch (error) {
+          alert("Error exchanging token: " + error.message);
+        }
+      }
+
+      // Step 4: Sync Transactions
+      document
+        .getElementById("syncTransactions")
+        .addEventListener("click", async () => {
+          try {
+            document.getElementById("syncResult").textContent = "Syncing...";
+            document.getElementById("syncResult").style.display = "block";
+
+            const response = await fetch(
+              `${API_BASE}/plaid/sync/${accountId}`,
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({}),
+              }
+            );
+
+            const data = await response.json();
+            document.getElementById("syncResult").textContent = JSON.stringify(
+              data,
+              null,
+              2
+            );
+
+            alert(`Successfully synced ${data.synced} transactions!`);
+          } catch (error) {
+            alert("Error syncing: " + error.message);
+            document.getElementById("syncResult").textContent =
+              "Error: " + error.message;
+          }
+        });
+    </script>
+  </body>
+</html>

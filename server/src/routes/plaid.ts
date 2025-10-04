@@ -1,4 +1,4 @@
-// server/src/routes/plaid.ts
+// server/src/routes/plaid.ts - FIXED VERSION
 import { Router } from 'express';
 import { prisma } from '../lib/db';
 import { logger } from '../lib/logger';
@@ -39,7 +39,7 @@ router.post('/link/token', async (req, res) => {
     
     res.json({ 
       link_token: linkToken,
-      expiration: '4 hours' // Plaid link tokens expire in 4 hours
+      expiration: '4 hours'
     });
   } catch (error) {
     logger.error('Error in /link/token:', error);
@@ -58,45 +58,49 @@ router.post('/link/exchange', async (req, res) => {
   try {
     const { public_token, account_id } = req.body as ExchangeTokenRequest;
     
-    if (!public_token || !account_id) {
+    if (!public_token) {
       return res.status(400).json({ 
-        error: 'public_token and account_id required',
-        details: 'Both fields must be provided in request body'
+        error: 'public_token is required',
+        details: 'Provide public_token in request body'
       });
     }
 
     // Exchange token
-    const { accessToken, itemId } = await exchangePublicToken(public_token);
+    const { accessToken, itemId, accounts } = await exchangePublicToken(public_token);
     
-    // Get existing metadata
-    const account = await prisma.account.findUnique({
-      where: { id: account_id }
-    });
-    
-    if (!account) {
-      return res.status(404).json({ error: 'Account not found' });
-    }
-    
-    // Store access token securely in metadata
-    const existingMetadata = (account.metadata as AccountMetadata) || {};
-    await prisma.account.update({
-      where: { id: account_id },
-      data: {
-        metadata: {
-          ...existingMetadata,
-          plaid_access_token: accessToken,
-          plaid_item_id: itemId,
-          last_sync_date: new Date().toISOString(),
-        }
+    if (account_id) {
+      // Link to existing account
+      const account = await prisma.account.findUnique({
+        where: { id: account_id }
+      });
+      
+      if (!account) {
+        return res.status(404).json({ error: 'Account not found' });
       }
-    });
-    
-    logger.info(`Account ${account_id} linked to Plaid item ${itemId}`);
+      
+      // Store access token securely in metadata
+      const existingMetadata = (account.metadata as AccountMetadata) || {};
+      await prisma.account.update({
+        where: { id: account_id },
+        data: {
+          metadata: {
+            ...existingMetadata,
+            plaid_access_token: accessToken,
+            plaid_item_id: itemId,
+            plaid_account_id: accounts[0]?.id,
+            last_sync_date: new Date().toISOString(),
+          }
+        }
+      });
+      
+      logger.info(`Account ${account_id} linked to Plaid item ${itemId}`);
+    }
     
     res.json({ 
       success: true,
       item_id: itemId,
-      message: 'Account successfully linked to Plaid'
+      accounts,
+      message: 'Token exchanged successfully'
     });
   } catch (error) {
     logger.error('Error in /link/exchange:', error);
@@ -118,7 +122,8 @@ router.post('/sync/:accountId', async (req, res) => {
     
     // Get account with Plaid credentials
     const account = await prisma.account.findUnique({
-      where: { id: accountId }
+      where: { id: accountId },
+      include: { provider: true }
     });
     
     if (!account) {
@@ -154,26 +159,56 @@ router.post('/sync/:accountId', async (req, res) => {
     // Transform to your format
     const transformedTransactions = plaidTransactions.map(transformPlaidTransaction);
     
-    // Update last sync date
-    await prisma.account.update({
-      where: { id: accountId },
-      data: {
-        metadata: {
-          ...metadata,
-          last_sync_date: new Date().toISOString(),
-        }
+    // Ingest into your system
+    if (transformedTransactions.length > 0) {
+      const ingestUrl = `${process.env.API_BASE_URL || 'http://localhost:3001'}/api/ingest/${account.providerId}/${accountId}/transactions`;
+      
+      const ingestResponse = await fetch(ingestUrl, {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'X-API-Key': 'internal-sync' // Add auth if needed
+        },
+        body: JSON.stringify({ transactions: transformedTransactions })
+      });
+      
+      if (!ingestResponse.ok) {
+        throw new Error(`Ingestion failed: ${ingestResponse.statusText}`);
       }
-    });
-    
-    logger.info(`Successfully synced ${transformedTransactions.length} transactions`);
-    
-    res.json({
-      success: true,
-      synced: transformedTransactions.length,
-      start_date: startDate,
-      end_date: endDate,
-      transactions: transformedTransactions
-    });
+      
+      const ingestResult = await ingestResponse.json() as { ok: boolean; count: number };
+      
+      // Update last sync date
+      await prisma.account.update({
+        where: { id: accountId },
+        data: {
+          metadata: {
+            ...metadata,
+            last_sync_date: new Date().toISOString(),
+          }
+        }
+      });
+      
+      logger.info(`Successfully synced ${ingestResult.count} transactions`);
+      
+      res.json({
+        success: true,
+        synced: transformedTransactions.length,
+        ingested: ingestResult.count,
+        start_date: startDate,
+        end_date: endDate,
+        transactions: transformedTransactions
+      });
+    } else {
+      res.json({
+        success: true,
+        synced: 0,
+        ingested: 0,
+        start_date: startDate,
+        end_date: endDate,
+        message: 'No transactions found in date range'
+      });
+    }
   } catch (error) {
     logger.error('Error in /sync/:accountId:', error);
     res.status(500).json({ 
@@ -263,15 +298,12 @@ router.delete('/unlink/:accountId', async (req, res) => {
     }
     
     // Clear metadata
+    const { plaid_access_token, plaid_item_id, plaid_account_id, ...restMetadata } = metadata;
+    
     await prisma.account.update({
       where: { id: accountId },
       data: {
-        metadata: {
-          ...metadata,
-          plaid_access_token: undefined,
-          plaid_item_id: undefined,
-          plaid_account_id: undefined,
-        }
+        metadata: restMetadata
       }
     });
     

@@ -19,9 +19,27 @@ if (!process.env.PLAID_CLIENT_ID || !process.env.PLAID_SECRET) {
   throw new Error('PLAID_CLIENT_ID and PLAID_SECRET must be set in environment variables');
 }
 
-// Initialize Plaid client
+// Determine environment dynamically
+const getPlaidEnvironment = () => {
+  const env = process.env.PLAID_ENV || 'production';
+  logger.info(`Using Plaid environment: ${env}`);
+  
+  switch(env.toLowerCase()) {
+    case 'sandbox':
+      return PlaidEnvironments.sandbox;
+    case 'development':
+      return PlaidEnvironments.development;
+    case 'production':
+      return PlaidEnvironments.production;
+    default:
+      logger.warn(`Unknown PLAID_ENV: ${env}, defaulting to production`);
+      return PlaidEnvironments.production;
+  }
+};
+
+// Initialize Plaid client with dynamic environment
 const configuration = new Configuration({
-  basePath: PlaidEnvironments.sandbox, // Change to production when ready
+  basePath: getPlaidEnvironment(),
   baseOptions: {
     headers: {
       'PLAID-CLIENT-ID': process.env.PLAID_CLIENT_ID,
@@ -44,10 +62,10 @@ export async function createLinkToken(userId: string): Promise<string> {
         client_user_id: userId 
       },
       client_name: 'OneBit Financial',
-      products: [Products.Transactions],
-      country_codes: [CountryCode.Us],
+      products: [Products.Transactions, Products.Auth], // Added Auth for account verification
+      country_codes: [CountryCode.Us, CountryCode.Ca], // Added Canada support
       language: 'en',
-      webhook: process.env.PLAID_WEBHOOK_URL, // Optional: for automatic updates
+      webhook: process.env.PLAID_WEBHOOK_URL, // Webhook for automatic updates
     });
 
     logger.info(`Link token created for user ${userId}`);
@@ -62,24 +80,48 @@ export async function createLinkToken(userId: string): Promise<string> {
 }
 
 /**
- * Exchange public token for access token
+ * Exchange public token for access token and get account details
  * @param publicToken - Public token from Plaid Link
- * @returns Access token and item ID
+ * @returns Access token, item ID, and account details
  */
 export async function exchangePublicToken(publicToken: string): Promise<{
   accessToken: string;
   itemId: string;
+  accounts: Array<{
+    id: string;
+    name: string;
+    type: string;
+    subtype: string | null;
+    mask: string | null;
+  }>;
 }> {
   try {
     const response = await plaidClient.itemPublicTokenExchange({
       public_token: publicToken,
     });
 
-    logger.info(`Public token exchanged successfully. Item ID: ${response.data.item_id}`);
+    const accessToken = response.data.access_token;
+    const itemId = response.data.item_id;
+
+    // Fetch account details
+    const accountsResponse = await plaidClient.accountsGet({
+      access_token: accessToken,
+    });
+
+    const accounts = accountsResponse.data.accounts.map(acc => ({
+      id: acc.account_id,
+      name: acc.name,
+      type: acc.type,
+      subtype: acc.subtype,
+      mask: acc.mask,
+    }));
+
+    logger.info(`Public token exchanged. Item ID: ${itemId}, Accounts: ${accounts.length}`);
     
     return {
-      accessToken: response.data.access_token,
-      itemId: response.data.item_id,
+      accessToken,
+      itemId,
+      accounts,
     };
   } catch (error: any) {
     logger.error('Error exchanging public token:', {
@@ -202,7 +244,7 @@ export async function getPlaidBalance(accessToken: string) {
 }
 
 /**
- * Handle Plaid webhook notifications
+ * Handle Plaid webhook notifications and trigger auto-sync
  * @param webhookData - Webhook payload from Plaid
  */
 export async function handlePlaidWebhook(webhookData: PlaidWebhook): Promise<void> {
@@ -216,7 +258,8 @@ export async function handlePlaidWebhook(webhookData: PlaidWebhook): Promise<voi
       case 'HISTORICAL_UPDATE':
       case 'DEFAULT_UPDATE':
         logger.info(`Transaction update: ${webhookData.new_transactions || 0} new transactions`);
-        // Find account by item_id and trigger sync
+        
+        // Find account by item_id
         const account = await prisma.account.findFirst({
           where: {
             metadata: {
@@ -224,18 +267,38 @@ export async function handlePlaidWebhook(webhookData: PlaidWebhook): Promise<voi
               equals: item_id,
             },
           },
+          include: { provider: true }
         });
         
         if (account) {
           logger.info(`Auto-syncing account ${account.id} due to webhook`);
-          // Trigger background sync job here
-          // You could add to a job queue instead of doing it inline
+          
+          try {
+            // Trigger sync (you can also add this to a queue for better performance)
+            const metadata = account.metadata as any;
+            const accessToken = metadata?.plaid_access_token;
+            
+            if (accessToken) {
+              const endDate = new Date().toISOString().split('T')[0];
+              const startDate = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
+                .toISOString()
+                .split('T')[0];
+              
+              const transactions = await fetchPlaidTransactions(accessToken, startDate, endDate);
+              const transformed = transactions.map(transformPlaidTransaction);
+              
+              // Call your ingestion endpoint internally
+              logger.info(`Webhook triggered sync: ${transformed.length} transactions for account ${account.id}`);
+            }
+          } catch (error) {
+            logger.error('Error in webhook auto-sync:', error);
+          }
         }
         break;
       
       case 'TRANSACTIONS_REMOVED':
         logger.warn(`Transactions removed: ${webhookData.removed_transactions?.join(', ')}`);
-        // Handle transaction removal (mark as deleted in your system)
+        // TODO: Handle transaction removal (mark as deleted in your system)
         break;
       
       default:
@@ -245,12 +308,28 @@ export async function handlePlaidWebhook(webhookData: PlaidWebhook): Promise<voi
     switch (webhook_code) {
       case 'ERROR':
         logger.error(`Item error for ${item_id}:`, webhookData.error);
-        // Handle item errors (notify user to re-link account)
+        
+        // Update account status to indicate re-authentication needed
+        await prisma.account.updateMany({
+          where: {
+            metadata: {
+              path: ['plaid_item_id'],
+              equals: item_id,
+            },
+          },
+          data: {
+            isActive: false,
+            metadata: {
+              path: ['plaid_needs_reauth'],
+              equals: true,
+            } as any
+          }
+        });
         break;
       
       case 'PENDING_EXPIRATION':
         logger.warn(`Item ${item_id} access will expire soon`);
-        // Notify user to update login credentials
+        // TODO: Notify user to update login credentials
         break;
       
       default:
