@@ -161,22 +161,68 @@ router.post('/sync/:accountId', async (req, res) => {
     
     // Ingest into your system
     if (transformedTransactions.length > 0) {
-      const ingestUrl = `${process.env.API_BASE_URL || 'http://localhost:3001'}/api/ingest/${account.providerId}/${accountId}/transactions`;
+      const { stableHashV1 } = await import('../lib/hash.js');
+      const { normalizeRaw } = await import('../services/normalize.js');
+      const { linkTransfers } = await import('../services/transferDetect.js');
+      const { postToLedger } = await import('../services/ledger.js');
+      const { classifyTransaction } = await import('../services/classify.js');
       
-      const ingestResponse = await fetch(ingestUrl, {
-        method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          'X-API-Key': 'internal-sync' // Add auth if needed
-        },
-        body: JSON.stringify({ transactions: transformedTransactions })
-      });
+      let ingested = 0;
       
-      if (!ingestResponse.ok) {
-        throw new Error(`Ingestion failed: ${ingestResponse.statusText}`);
+      for (const txn of transformedTransactions) {
+        try {
+          const dateISO = txn.timestamp_posted.slice(0, 10);
+          const hashV1 = stableHashV1({
+            providerId: account.providerId,
+            accountId,
+            dateISO,
+            amountCents: Math.round(txn.amount * 100),
+            description: txn.description_raw,
+            currency: txn.currency
+          });
+
+          let raw = await prisma.rawTransaction.findFirst({
+            where: {
+              OR: [
+                { providerId: account.providerId, accountId, hashV1 },
+                txn.provider_tx_id ? { 
+                  providerId: account.providerId, 
+                  providerTxId: txn.provider_tx_id 
+                } : { id: 'never-matches' }
+              ]
+            }
+          });
+
+          if (!raw) {
+            raw = await prisma.rawTransaction.create({
+              data: {
+                providerId: account.providerId,
+                accountId,
+                hashV1,
+                providerTxId: txn.provider_tx_id,
+                timestampPosted: txn.timestamp_posted ? new Date(txn.timestamp_posted) : null,
+                timestampAuth: txn.timestamp_auth ? new Date(txn.timestamp_auth) : null,
+                amount: txn.amount,
+                currency: txn.currency,
+                descriptionRaw: txn.description_raw,
+                counterpartyRaw: txn.counterparty_raw,
+                metaJson: txn.meta_json ? JSON.stringify(txn.meta_json) : undefined
+              }
+            });
+          }
+
+          const canonical = await normalizeRaw(raw);
+          await linkTransfers(canonical.accountId, canonical.postedAt);
+          await postToLedger(canonical.id);
+          await classifyTransaction(canonical.id);
+          
+          ingested++;
+        } catch (err) {
+          logger.error(`Failed to ingest transaction ${txn.provider_tx_id}:`, err);
+        }
       }
       
-      const ingestResult = await ingestResponse.json() as { ok: boolean; count: number };
+      const ingestResult = { ok: true, count: ingested };
       
       // Update last sync date
       await prisma.account.update({

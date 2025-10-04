@@ -1,4 +1,3 @@
-// client/src/components/PlaidLink.tsx
 import { useCallback, useEffect, useState } from 'react';
 import { usePlaidLink } from 'react-plaid-link';
 import { Button } from './ui/Button';
@@ -18,7 +17,7 @@ export function PlaidLink({ onSuccess, accountId }: PlaidLinkProps) {
     const createLinkToken = async () => {
       try {
         const response = await api.post('/plaid/link/token', {
-          user_id: 'user-123' // Replace with actual user ID from auth
+          user_id: 'user-123'
         });
         setLinkToken(response.data.link_token);
       } catch (error: any) {
@@ -35,66 +34,70 @@ export function PlaidLink({ onSuccess, accountId }: PlaidLinkProps) {
     
     try {
       console.log('Plaid Link success, exchanging token...');
+      console.log('Metadata:', metadata);
       
-      // Exchange public token
-      const exchangeResponse = await api.post('/plaid/link/exchange', {
-        public_token,
-        account_id: accountId || '' // Will create new account if not provided
-      });
-
-      console.log('Token exchanged:', exchangeResponse.data);
-
-      // Get the provider ID (Plaid)
-      const providersResponse = await api.get('/accounts');
-      const plaidProvider = providersResponse.data.find((acc: any) => 
-        acc.provider?.name === 'Plaid'
-      )?.provider;
-
-      if (!plaidProvider) {
-        throw new Error('Plaid provider not found');
-      }
-
       let finalAccountId = accountId;
 
-      // Create new account if not provided
-      if (!accountId && exchangeResponse.data.accounts?.[0]) {
-        const plaidAccount = exchangeResponse.data.accounts[0];
-        
+      // If no accountId provided, create new account first
+      if (!accountId) {
+        // Get Plaid provider
+        const providersResponse = await api.get('/accounts');
+        const accounts = Array.isArray(providersResponse.data) ? providersResponse.data : [];
+        const plaidProvider = accounts.find((acc: any) => 
+          acc.provider?.name === 'Plaid'
+        )?.provider;
+
+        if (!plaidProvider) {
+          throw new Error('Plaid provider not found. Run: cd server && npm run prisma:seed');
+        }
+
+        // Create account
         const accountResponse = await api.post('/accounts', {
           user_id: 'user-123',
           provider_id: plaidProvider.id,
           institution_id: metadata.institution?.institution_id || 'plaid_institution',
-          account_type: plaidAccount.subtype || plaidAccount.type || 'bank_checking',
+          account_type: metadata.accounts?.[0]?.subtype || 'bank_checking',
           currency: 'USD',
-          mask: plaidAccount.mask || '',
-          display_name: plaidAccount.name || 'Plaid Account'
+          mask: metadata.accounts?.[0]?.mask || '',
+          display_name: metadata.accounts?.[0]?.name || metadata.institution?.name || 'Plaid Account'
         });
 
         finalAccountId = accountResponse.data.id;
         console.log('Created account:', finalAccountId);
-
-        // Now update with Plaid metadata
-        await api.post('/plaid/link/exchange', {
-          public_token,
-          account_id: finalAccountId
-        });
       }
 
-      // Trigger initial sync
-      if (finalAccountId) {
-        console.log('Syncing transactions for account:', finalAccountId);
-        const syncResponse = await api.post(`/plaid/sync/${finalAccountId}`, {
-          start_date: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
-            .toISOString()
-            .split('T')[0],
-          end_date: new Date().toISOString().split('T')[0]
-        });
-        
-        console.log('Sync complete:', syncResponse.data);
-        onSuccess(finalAccountId);
+      
+      // Exchange token and link to account
+      const exchangeResponse = await api.post('/plaid/link/exchange', {
+        public_token,
+        account_id: finalAccountId
+      });
+
+      console.log('Token exchanged:', exchangeResponse.data);
+
+      // 🔄 Add delay here to allow Plaid to prepare transaction data
+      console.log('Waiting 3 seconds before syncing transactions...');
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+
+      // Now trigger initial sync
+      if (!finalAccountId) {
+        throw new Error('Failed to get account ID');
       }
+
+      console.log('Syncing transactions for account:', finalAccountId);
+      const syncResponse = await api.post(`/plaid/sync/${finalAccountId}`, {
+        start_date: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
+          .toISOString()
+          .split('T')[0],
+        end_date: new Date().toISOString().split('T')[0]
+      });
+
+      
+      console.log('Sync complete:', syncResponse.data);
+      onSuccess(finalAccountId);
     } catch (error: any) {
       console.error('Error in Plaid flow:', error);
+      console.error('Error details:', error.response?.data);
       setError(error.response?.data?.message || error.message || 'Failed to connect account');
     } finally {
       setLoading(false);
