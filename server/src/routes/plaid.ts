@@ -1,4 +1,3 @@
-// server/src/routes/plaid.ts - FIXED VERSION
 import { Router } from 'express';
 import { prisma } from '../lib/db';
 import { logger } from '../lib/logger';
