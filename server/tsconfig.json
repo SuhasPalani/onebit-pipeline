@@ -4,10 +4,12 @@
     "outDir": "./dist",
     "rootDir": ".",
     "baseUrl": "./src",
+    "composite": true,
     "paths": {
       "@/*": ["./*"],
       "@/lib/*": ["./lib/*"],
       "@/services/*": ["./services/*"],
+      
       "@/types/*": ["./types/*"]
     }
   },

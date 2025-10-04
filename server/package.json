@@ -4,7 +4,7 @@
   "description": "ONEBIT transaction pipeline server",
   "main": "dist/index.js",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
+    "dev:nodemon": "nodemon --watch src --ext ts --exec tsx src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
     "prisma:generate": "prisma generate",
@@ -43,6 +43,7 @@
     "@typescript-eslint/parser": "^6.17.0",
     "eslint": "^8.56.0",
     "jest": "^29.7.0",
+    "nodemon": "^3.1.10",
     "prisma": "^5.8.0",
     "ts-jest": "^29.1.1",
     "tsx": "^4.7.0",

@@ -12,8 +12,14 @@
     "skipLibCheck": true,
     "declaration": true,
     "declarationMap": true,
-    "sourceMap": true
+    "sourceMap": true,
+    "composite": true
   },
+  "exclude": [
+    "client/postcss.config.js",
+    "client/tailwind.config.js",
+    "server/jest.config.js"
+  ],
   "references": [
     { "path": "./server" },
     { "path": "./client" }
